@@ -93,3 +93,7 @@ If you find Vim is useful in your research or applications, please consider givi
   booktitle={Forty-first International Conference on Machine Learning}
 }
 ```
+
+## Todo
+
+- [ ] Update `*_ref` in [selective_state_update.py](mamba-1p1p1\mamba_ssm\ops\triton\selective_state_update.py) and [selective_scan_interface.py](mamba-1p1p1\mamba_ssm\ops\selective_scan_interface.py)

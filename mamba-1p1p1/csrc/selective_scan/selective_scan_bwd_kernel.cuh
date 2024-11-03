@@ -24,7 +24,7 @@ template<> __device__ __forceinline__ float conj<float>(float x) { return x; }
 template<> __device__ __forceinline__ complex_t conj<complex_t>(complex_t x) { return std::conj(x); }
 
 template<int kNThreads_, int kNItems_, bool kIsEvenLen_, bool kIsVariableB_, bool kIsVariableC_,
-         bool kDeltaSoftplus_, bool kHasZ_, typename input_t_, typename weight_t_>
+         bool kDeltaSoftplus_, bool kHasZ_, bool kHasMask_, typename input_t_, typename weight_t_>
 struct Selective_Scan_bwd_kernel_traits {
     static_assert(kNItems_ % 4 == 0);
     using input_t = input_t_;
@@ -42,6 +42,7 @@ struct Selective_Scan_bwd_kernel_traits {
     static constexpr bool kIsVariableC = kIsVariableC_;
     static constexpr bool kDeltaSoftplus = kDeltaSoftplus_;
     static constexpr bool kHasZ = kHasZ_;
+    static constexpr bool kHasMask = kHasMask_;
     // Setting MinBlocksPerMP to be 3 (instead of 2) for 128 threads with float improves occupancy.
     // For complex this would lead to massive register spilling, so we keep it at 2.
     static constexpr int kMinBlocks = kNThreads == 128 && !kIsComplex ? 3 : 2;
@@ -80,6 +81,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     constexpr bool kIsVariableC = Ktraits::kIsVariableC;
     constexpr bool kDeltaSoftplus = Ktraits::kDeltaSoftplus;
     constexpr bool kHasZ = Ktraits::kHasZ;
+    constexpr bool kHasMask = Ktraits::kHasMask;
     constexpr int kNThreads = Ktraits::kNThreads;
     constexpr int kNItems = Ktraits::kNItems;
     using input_t = typename Ktraits::input_t;
@@ -134,6 +136,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     scan_t *x = params.x_ptr == nullptr
         ? nullptr
         : reinterpret_cast<scan_t *>(params.x_ptr) + (batch_id * params.dim + dim_id) * (params.n_chunks) * params.dstate;
+    input_t *mask = nullptr;
     float dD_val = 0;
     float ddelta_bias_val = 0;
 
@@ -143,6 +146,10 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     dout += (params.n_chunks - 1) * kChunkSize;
     Bvar += (params.n_chunks - 1) * kChunkSize * (!kIsComplex ? 1 : 2);
     Cvar += (params.n_chunks - 1) * kChunkSize * (!kIsComplex ? 1 : 2);
+    if constexpr (kHasMask) {
+        mask = reinterpret_cast<input_t *>(params.mask_ptr);
+        mask += (params.n_chunks - 1) * kChunkSize;
+    }
     for (int chunk = params.n_chunks - 1; chunk >= 0; --chunk) {
         input_t u_vals[kNItems];
         input_t delta_vals_load[kNItems];
@@ -226,6 +233,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
             }
             weight_t B_val, C_val;
             weight_t B_vals[kNItems], C_vals[kNItems];
+            input_t mask_vals[kNItems];
             if constexpr (!kIsVariableB) {
                 B_val = B[state_idx * params.B_dstate_stride];
             } else {
@@ -239,12 +247,18 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 load_weight<Ktraits>(Cvar + state_idx * params.C_dstate_stride, C_vals,
                     smem_load_weight_C, (params.seqlen - chunk * kChunkSize) * (!kIsComplex ? 1 : 2));
             }
+            if constexpr (kHasMask) {
+                load_input<Ktraits>(mask, mask_vals, smem_load, params.seqlen - chunk * kChunkSize);
+                mask -= kChunkSize;
+            }
             // const weight_t A_val = smem_a[state_idx];
             scan_t thread_data[kNItems], thread_reverse_data[kNItems];
             if constexpr (!kIsComplex) {
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
-                    const float delta_a_exp = exp2f(delta_vals[i] * A_scaled);
+                    float delta_a_exp = exp2f(delta_vals[i] * A_scaled);
+                    if constexpr (kHasMask)
+                        delta_a_exp *= mask_vals[i];
                     thread_data[i] = make_float2(delta_a_exp, !kIsVariableB ? delta_vals[i] * float(u_vals[i]) : delta_vals[i] * float(u_vals[i]) * B_vals[i]);
                     if (i == 0) {
                         smem_delta_a[threadIdx.x == 0 ? state_idx + (chunk % 2) * MAX_DSTATE : threadIdx.x + 2 * MAX_DSTATE] = delta_a_exp;
@@ -280,8 +294,14 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     const float ddelta_u = !kIsVariableB ? dx : dx * B_vals[i];
                     du_vals[i] += ddelta_u * delta_vals[i];
                     const float a = thread_data[i].y - (!kIsVariableB ? delta_vals[i] * float(u_vals[i]) : delta_vals[i] * float(u_vals[i]) * B_vals[i]);
-                    ddelta_vals[i] += ddelta_u * float(u_vals[i]) + dx * A_val * a;
-                    dA_val += dx * delta_vals[i] * a;
+                    if constexpr (kHasMask) {
+                        ddelta_vals[i] += ddelta_u * float(u_vals[i]) + dx * A_val * a * mask_vals[i];
+                        dA_val += dx * delta_vals[i] * a * mask_vals[i];
+                    }
+                    else {
+                        ddelta_vals[i] += ddelta_u * float(u_vals[i]) + dx * A_val * a;
+                        dA_val += dx * delta_vals[i] * a;
+                    }
                     if constexpr (!kIsVariableB || !kIsVariableC) {
                         if constexpr (!kIsVariableB) {  // dBC_val is dB_val
                             dBC_val += dout_vals[i] * (!kIsVariableC ? thread_data[i].y : thread_data[i].y * C_vals[i]);
@@ -381,8 +401,14 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     }
                     const complex_t a_conj = conj(x - (!kIsVariableB ? delta_vals[i] * float(u_vals[i]) : delta_vals[i] * float(u_vals[i]) * B_vals[i]));
                     du_vals[i] += ddelta_u * delta_vals[i];
-                    ddelta_vals[i] += ddelta_u * float(u_vals[i]) + (dx * conj(A_val) * a_conj).real_;
-                    dA_val += delta_vals[i] * dx * a_conj;
+                    if constexpr (kHasMask) {
+                        ddelta_vals[i] += ddelta_u * float(u_vals[i]) + (dx * conj(A_val) * a_conj).real_ * mask_vals[i];
+                        dA_val += delta_vals[i] * dx * a_conj * complex_t(mask_vals[i], mask_vals[i]);
+                    }
+                    else {
+                        ddelta_vals[i] += ddelta_u * float(u_vals[i]) + (dx * conj(A_val) * a_conj).real_;
+                        dA_val += delta_vals[i] * dx * a_conj;
+                    }
                     if constexpr (kIsVariableB) { dB_vals[i] = dx * delta_vals[i] * float(u_vals[i]); }
                     if constexpr (kIsVariableC) {
                         dC_vals[i] = (2 * dout_vals[i]) * conj(!kIsVariableB ? x * B_val : x);
@@ -494,8 +520,9 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
         BOOL_SWITCH(params.is_variable_B, kIsVariableB, [&] {
             BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
                 BOOL_SWITCH(params.delta_softplus, kDeltaSoftplus, [&] {
-                    BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
-                        using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
+                    BOOL_SWITCH(params.z_ptr != nullptr, kHasZ, [&] {
+                      BOOL_SWITCH(params.mask_ptr != nullptr, kHasMask, [&] {
+                        using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, kHasMask, input_t, weight_t>;
                         // using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, true, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
                         // TODO: check this
                         constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
@@ -508,6 +535,7 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
                         }
                         kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                         C10_CUDA_KERNEL_LAUNCH_CHECK();
+                      });
                     });
                 });
             });

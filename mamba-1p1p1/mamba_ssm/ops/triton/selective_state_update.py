@@ -34,6 +34,7 @@ def _selective_scan_update_kernel(
     stride_D_dim,
     stride_z_batch, stride_z_dim,
     stride_out_batch, stride_out_dim,
+    da_mask: tl.constexpr,
     # Meta-parameters
     DT_SOFTPLUS: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -77,7 +78,7 @@ def _selective_scan_update_kernel(
     if DT_SOFTPLUS:
         dt = tl.log(1.0 + tl.exp(dt))
     A = tl.load(A_ptrs, mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate), other=0.0).to(tl.float32)
-    dA = tl.exp(A * dt[:, None])
+    dA = tl.exp(A * dt[:, None]) * da_mask
     B = tl.load(B_ptrs, mask=offs_n < dstate, other=0.0).to(tl.float32)
     C = tl.load(C_ptrs, mask=offs_n < dstate, other=0.0).to(tl.float32)
     if HAS_D:
@@ -96,7 +97,7 @@ def _selective_scan_update_kernel(
     tl.store(out_ptrs, out, mask=offs_m < dim)
 
 
-def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False):
+def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False, da_mask=None):
     """
     Argument:
         state: (batch, dim, dstate)
@@ -111,6 +112,10 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
     Return:
         out: (batch, dim)
     """
+    if da_mask is None:
+        da_mask = float(1.0)
+    else:
+        da_mask = float(da_mask)
     batch, dim, dstate = state.shape
     assert x.shape == (batch, dim)
     assert dt.shape == x.shape
@@ -147,6 +152,7 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
             D.stride(0) if D is not None else 0,
             z_strides[0], z_strides[1],
             out.stride(0), out.stride(1),
+            da_mask,
             dt_softplus,
             BLOCK_SIZE_M,
             num_warps=num_warps,

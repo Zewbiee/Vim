@@ -77,6 +77,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         const at::Tensor out_z,
                         void* D_ptr,
                         void* delta_bias_ptr,
+                        void* mask_ptr,
                         void* x_ptr,
                         bool has_z,
                         bool delta_softplus) {
@@ -105,6 +106,9 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.C_ptr = C.data_ptr();
     params.D_ptr = D_ptr;
     params.delta_bias_ptr = delta_bias_ptr;
+#if ENABLE_MASK
+    params.mask_ptr = mask_ptr;
+#endif
     params.out_ptr = out.data_ptr();
     params.x_ptr = x_ptr;
     params.z_ptr = has_z ? z.data_ptr() : nullptr;
@@ -161,6 +165,7 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
                         const at::Tensor out_z,
                         void* D_ptr,
                         void* delta_bias_ptr,
+                        void* mask_ptr,
                         void* x_ptr,
                         const at::Tensor dout,
                         const at::Tensor du,
@@ -181,7 +186,7 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
                        // If not recompute_out_z, pass dout instead of out_z.
                        // This won't be used by the bwd kernel
                        recompute_out_z ? out_z : dout,
-                       D_ptr, delta_bias_ptr, x_ptr, has_z, delta_softplus);
+                       D_ptr, delta_bias_ptr, mask_ptr, x_ptr, has_z, delta_softplus);
     if (!recompute_out_z) { params.out_z_ptr = nullptr; }
 
     // Set the pointers and strides.
@@ -229,6 +234,7 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                   const c10::optional<at::Tensor> &D_,
                   const c10::optional<at::Tensor> &z_,
                   const c10::optional<at::Tensor> &delta_bias_,
+                  const c10::optional<at::Tensor> &mask_,
                   bool delta_softplus) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
@@ -293,6 +299,14 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
         CHECK_SHAPE(delta_bias, dim);
     }
 
+    if (mask_.has_value()) {
+        auto mask = mask_.value();
+        TORCH_CHECK(mask.scalar_type() == at::ScalarType::Float);
+        TORCH_CHECK(mask.is_cuda());
+        TORCH_CHECK(mask.stride(-1) == 1 || mask.size(-1) == 1);
+        CHECK_SHAPE(mask, seqlen);
+    }
+
     at::Tensor z, out_z;
     const bool has_z = z_.has_value();
     if (has_z) {
@@ -317,6 +331,7 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                        u, delta, A, B, C, out, z, out_z,
                        D_.has_value() ? D_.value().data_ptr() : nullptr,
                        delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
+                       mask_.has_value() ? mask_.value().data_ptr() : nullptr,
                        x.data_ptr(),
                        has_z,
                        delta_softplus);
@@ -341,6 +356,7 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                   const c10::optional<at::Tensor> &D_,
                   const c10::optional<at::Tensor> &z_,
                   const c10::optional<at::Tensor> &delta_bias_,
+                  const c10::optional<at::Tensor> &mask_,
                   const at::Tensor &dout,
                   const c10::optional<at::Tensor> &x_,
                   const c10::optional<at::Tensor> &out_,
@@ -414,6 +430,14 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
         CHECK_SHAPE(delta_bias, dim);
     }
 
+    if (mask_.has_value()) {
+        auto mask = mask_.value();
+        TORCH_CHECK(mask.scalar_type() == at::ScalarType::Float);
+        TORCH_CHECK(mask.is_cuda());
+        TORCH_CHECK(mask.stride(-1) == 1 || mask.size(-1) == 1);
+        CHECK_SHAPE(mask, seqlen);
+    }
+
     at::Tensor z, out, dz, out_z;
     const bool has_z = z_.has_value();
     if (has_z) {
@@ -470,6 +494,7 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                        u, delta, A, B, C, z, out, out_z,
                        D_.has_value() ? D_.value().data_ptr() : nullptr,
                        delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
+                       mask_.has_value() ? mask_.value().data_ptr() : nullptr,
                        x_.has_value() ? x_.value().data_ptr() : nullptr,
                        dout, du, ddelta, dA, dB, dC, dz,
                        D_.has_value() ? dD.data_ptr() : nullptr,
