@@ -155,6 +155,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         delta += kChunkSize;
 
         if constexpr (kHasMask) {
+            __syncthreads();
             load_input<Ktraits>(mask, mask_vals, smem_load, params.seqlen - chunk * kChunkSize);
             mask += kChunkSize;
         }

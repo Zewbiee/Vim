@@ -154,6 +154,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
         input_t u_vals[kNItems];
         input_t delta_vals_load[kNItems];
         input_t dout_vals_load[kNItems];
+        input_t mask_vals[kNItems];
         __syncthreads();
         load_input<Ktraits>(u, u_vals, smem_load, params.seqlen - chunk * kChunkSize);
         u -= kChunkSize;
@@ -164,6 +165,11 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
         __syncthreads();
         load_input<Ktraits>(dout, dout_vals_load, smem_load, params.seqlen - chunk * kChunkSize);
         dout -= kChunkSize;
+        if constexpr (kHasMask) {
+            __syncthreads();
+            load_input<Ktraits>(mask, mask_vals, smem_load, params.seqlen - chunk * kChunkSize);
+            mask -= kChunkSize;
+        }
 
         float dout_vals[kNItems], delta_vals[kNItems];
         #pragma unroll
@@ -233,7 +239,6 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
             }
             weight_t B_val, C_val;
             weight_t B_vals[kNItems], C_vals[kNItems];
-            input_t mask_vals[kNItems];
             if constexpr (!kIsVariableB) {
                 B_val = B[state_idx * params.B_dstate_stride];
             } else {
@@ -246,10 +251,6 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 auto &smem_load_weight_C = !kIsVariableB ? smem_load_weight : smem_load_weight1;
                 load_weight<Ktraits>(Cvar + state_idx * params.C_dstate_stride, C_vals,
                     smem_load_weight_C, (params.seqlen - chunk * kChunkSize) * (!kIsComplex ? 1 : 2));
-            }
-            if constexpr (kHasMask) {
-                load_input<Ktraits>(mask, mask_vals, smem_load, params.seqlen - chunk * kChunkSize);
-                mask -= kChunkSize;
             }
             // const weight_t A_val = smem_a[state_idx];
             scan_t thread_data[kNItems], thread_reverse_data[kNItems];
