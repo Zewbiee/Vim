@@ -257,6 +257,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
             if constexpr (!kIsComplex) {
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
+                    // delta_a_exp must be a modifiable lvalue for kHasMask
                     float delta_a_exp = exp2f(delta_vals[i] * A_scaled);
                     if constexpr (kHasMask)
                         delta_a_exp *= mask_vals[i];
@@ -353,6 +354,8 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 for (int i = 0; i < kNItems; ++i) {
                     // Pytorch's implementation of complex exp (which calls thrust) is very slow
                     complex_t delta_a_exp = cexp2f(delta_vals[i] * A_scaled);
+                    if constexpr (kHasMask)
+                        delta_a_exp *= complex_t(mask_vals[i], mask_vals[i]);
                     weight_t B_delta_u_val = !kIsVariableB ? delta_vals[i] * float(u_vals[i]) : B_vals[i] * delta_vals[i] * float(u_vals[i]);
                     thread_data[i] = make_float4(delta_a_exp.real_, delta_a_exp.imag_, B_delta_u_val.real_, B_delta_u_val.imag_);
                     if (i == 0) {

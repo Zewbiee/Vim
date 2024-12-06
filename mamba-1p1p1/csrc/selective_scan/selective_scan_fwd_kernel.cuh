@@ -126,11 +126,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     }
 
     input_t *mask = nullptr;
-#if ENABLE_MASK
     if (kHasMask) {
         mask = reinterpret_cast<input_t *>(params.mask_ptr);
     }
-#endif
 
     // for (int state_idx = threadIdx.x; state_idx < params.dstate; state_idx += blockDim.x) {
     //     smem_a[state_idx] = A[state_idx * params.A_dstate_stride];
@@ -229,7 +227,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
                     if constexpr (!kIsComplex) {
-                        auto delta_a_exp = exp2f(delta_vals[r][i] * A_val[r]);
+                        float delta_a_exp = exp2f(delta_vals[r][i] * A_val[r]);
                         if constexpr (kHasMask)
                             delta_a_exp *= mask_vals[i];
                         thread_data[i] = make_float2(delta_a_exp,
@@ -332,12 +330,8 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
         BOOL_SWITCH(params.is_variable_B, kIsVariableB, [&] {
             BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
                 BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
-#if ENABLE_MASK
                   BOOL_SWITCH(params.mask_ptr != nullptr , kHasMask, [&] {
                     using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ, kHasMask, input_t, weight_t>;
-#else
-                    using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ, false, input_t, weight_t>;
-#endif
                     // constexpr int kSmemSize = Ktraits::kSmemSize;
                     constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
                     // printf("smem_size = %d\n", kSmemSize);
@@ -349,9 +343,7 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
                     }
                     kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                     C10_CUDA_KERNEL_LAUNCH_CHECK();
-#if ENABLE_MASK
                   });
-#endif
                 });
             });
         });

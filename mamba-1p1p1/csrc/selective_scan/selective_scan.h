@@ -22,8 +22,7 @@ struct SSMScanParamsBase {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-#define ENABLE_MASK 1
-// #define SSMParamsBase SSMParamsBase2
+
 struct SSMParamsBase {
     using index_t = uint32_t;
 
@@ -63,9 +62,7 @@ struct SSMParamsBase {
     void *__restrict__ u_ptr;
     void *__restrict__ delta_ptr;
     void *__restrict__ delta_bias_ptr;
-#if ENABLE_MASK
     void *__restrict__ mask_ptr;
-#endif
     void *__restrict__ out_ptr;
     void *__restrict__ x_ptr;
     void *__restrict__ z_ptr;

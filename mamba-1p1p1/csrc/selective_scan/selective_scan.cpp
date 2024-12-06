@@ -106,9 +106,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.C_ptr = C.data_ptr();
     params.D_ptr = D_ptr;
     params.delta_bias_ptr = delta_bias_ptr;
-#if ENABLE_MASK
     params.mask_ptr = mask_ptr;
-#endif
     params.out_ptr = out.data_ptr();
     params.x_ptr = x_ptr;
     params.z_ptr = has_z ? z.data_ptr() : nullptr;
